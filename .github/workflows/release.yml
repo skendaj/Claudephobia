@@ -63,20 +63,25 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        timeout-minutes: 30
         run: |
           zip -r Claudephobia.zip Claudephobia.app
 
-          xcrun notarytool submit Claudephobia.zip \
+          # Submit and wait up to 20 minutes for Apple to process
+          if xcrun notarytool submit Claudephobia.zip \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" \
-            --wait
+            --wait --timeout 20m; then
 
-          xcrun stapler staple Claudephobia.app
-
-          # Re-zip with stapled ticket
-          rm Claudephobia.zip
-          zip -r Claudephobia.zip Claudephobia.app
+            xcrun stapler staple Claudephobia.app
+            rm Claudephobia.zip
+            zip -r Claudephobia.zip Claudephobia.app
+            echo "NOTARIZED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Notarization timed out or failed. Releasing signed-only build."
+            echo "NOTARIZED=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Clean up keychain
         if: always()
