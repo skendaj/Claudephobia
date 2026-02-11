@@ -1,0 +1,180 @@
+import AppKit
+import SwiftUI
+import Combine
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private var popover: NSPopover!
+    private var viewModel: UsageViewModel!
+    private var cancellables = Set<AnyCancellable>()
+    private var settingsWindow: NSWindow?
+    private var eventMonitor: Any?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        viewModel = UsageViewModel()
+
+        // Status item
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+        // Popover — SwiftUI content determines size
+        popover = NSPopover()
+        popover.behavior = .transient
+        let hostingController = NSHostingController(rootView: PopoverView(viewModel: viewModel))
+        hostingController.sizingOptions = .preferredContentSize
+        popover.contentViewController = hostingController
+
+        if let button = statusItem.button {
+            button.action = #selector(togglePopover)
+            button.target = self
+        }
+
+        updateMenuBarDisplay()
+
+        // Re-render menu bar when any relevant property changes
+        Publishers.CombineLatest4(
+            viewModel.$sessionPercent,
+            viewModel.$weeklyPercent,
+            viewModel.$menuBarDisplayMode,
+            viewModel.$isPacingWarning
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _, _, _, _ in
+            self?.updateMenuBarDisplay()
+        }
+        .store(in: &cancellables)
+
+        // Open settings window when requested
+        viewModel.$showSettingsWindow
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.viewModel.showSettingsWindow = false
+                self?.closePopover()
+                self?.showSettings()
+            }
+            .store(in: &cancellables)
+
+        // Handle share actions — close popover first, then perform action
+        viewModel.$pendingShareAction
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] action in
+                self?.viewModel.pendingShareAction = nil
+                self?.closePopover()
+                // Small delay so popover finishes closing
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self?.performShareAction(action)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - Menu Bar
+
+    private func updateMenuBarDisplay() {
+        guard let button = statusItem.button else { return }
+
+        button.image = MenuBarRenderer.createImage(
+            sessionPercent: viewModel.sessionPercent,
+            weeklyPercent: viewModel.weeklyPercent,
+            isPacingWarning: viewModel.isPacingWarning
+        )
+        button.imagePosition = .imageLeading
+
+        button.title = MenuBarRenderer.titleText(
+            sessionPercent: viewModel.sessionPercent,
+            weeklyPercent: viewModel.weeklyPercent,
+            displayMode: viewModel.menuBarDisplayMode
+        )
+
+        button.toolTip = MenuBarRenderer.tooltip(
+            sessionPercent: viewModel.sessionPercent,
+            sessionReset: viewModel.sessionResetDescription,
+            weeklyPercent: viewModel.weeklyPercent,
+            weeklyReset: viewModel.weeklyResetDescription
+        )
+    }
+
+    // MARK: - Popover
+
+    @objc private func togglePopover() {
+        if popover.isShown {
+            closePopover()
+        } else if let button = statusItem.button {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            startEventMonitor()
+        }
+    }
+
+    private func closePopover() {
+        popover.performClose(nil)
+        stopEventMonitor()
+    }
+
+    private func startEventMonitor() {
+        stopEventMonitor()
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            guard let self = self, self.popover.isShown else { return }
+            self.closePopover()
+        }
+    }
+
+    private func stopEventMonitor() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+
+    // MARK: - Share Actions
+
+    private func performShareAction(_ action: ShareAction) {
+        switch action {
+        case .shareImage:
+            guard let image = ShareCardRenderer.renderImage(from: viewModel),
+                  let button = statusItem.button else { return }
+            let picker = NSSharingServicePicker(items: [image])
+            picker.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+
+        case .copyImage:
+            _ = ShareCardRenderer.copyToClipboard(from: viewModel)
+
+        case .saveImage:
+            ShareCardRenderer.saveToFile(from: viewModel)
+
+        case .exportJSON:
+            viewModel.exportToFile()
+        }
+    }
+
+    // MARK: - Settings Window
+
+    private func showSettings() {
+        if let existing = settingsWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let settingsView = SettingsView(viewModel: viewModel) { [weak self] in
+            self?.settingsWindow?.orderOut(nil)
+            DispatchQueue.main.async {
+                self?.settingsWindow = nil
+            }
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = NSHostingView(rootView: settingsView)
+        window.center()
+        window.title = "Claudephobia Settings"
+        window.level = .floating
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
+}

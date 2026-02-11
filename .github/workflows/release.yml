@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app bundle
+        run: |
+          swift build -c release
+
+          APP="Claudephobia.app"
+          CONTENTS="${APP}/Contents"
+          mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
+
+          cp .build/release/Claudephobia "${CONTENTS}/MacOS/Claudephobia"
+          cp Resources/Info.plist "${CONTENTS}/Info.plist"
+
+          if [ -f "Resources/AppIcon.icns" ]; then
+            cp "Resources/AppIcon.icns" "${CONTENTS}/Resources/AppIcon.icns"
+          fi
+
+          codesign --force --deep --sign - "${APP}"
+
+      - name: Create zip
+        run: zip -r Claudephobia.zip Claudephobia.app
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Claudephobia.zip
+          generate_release_notes: true
