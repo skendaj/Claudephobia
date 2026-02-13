@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
@@ -51,8 +54,9 @@ jobs:
             cp "Resources/AppIcon.icns" "${CONTENTS}/Resources/AppIcon.icns"
           fi
 
-          # Sign with Developer ID + hardened runtime
+          # Sign with Developer ID + hardened runtime + entitlements
           codesign --force --options runtime \
+            --entitlements Resources/Claudephobia.entitlements \
             --sign "Developer ID Application: Bruno Skendaj (53CZ5753ZD)" \
             "${APP}"
 
@@ -67,19 +71,58 @@ jobs:
         run: |
           zip -r Claudephobia.zip Claudephobia.app
 
-          # Submit and wait up to 20 minutes for Apple to process
-          if xcrun notarytool submit Claudephobia.zip \
+          # Submit for notarization
+          SUBMIT_OUTPUT=$(xcrun notarytool submit Claudephobia.zip \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" \
-            --wait --timeout 20m; then
+            --output-format json 2>&1) || true
 
-            xcrun stapler staple Claudephobia.app
-            rm Claudephobia.zip
-            zip -r Claudephobia.zip Claudephobia.app
-            echo "NOTARIZED=true" >> "$GITHUB_ENV"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "::error::Failed to submit for notarization"
+            echo "$SUBMIT_OUTPUT"
+            exit 1
+          fi
+
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # Poll for completion (up to 20 minutes)
+          if xcrun notarytool wait "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --timeout 20m; then
+
+            # Check final status
+            STATUS=$(xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" \
+              --output-format json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null)
+
+            echo "Notarization status: $STATUS"
+
+            if [ "$STATUS" = "Accepted" ]; then
+              xcrun stapler staple Claudephobia.app
+              rm Claudephobia.zip
+              zip -r Claudephobia.zip Claudephobia.app
+              echo "NOTARIZED=true" >> "$GITHUB_ENV"
+            else
+              echo "::warning::Notarization rejected. Fetching log..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_PASSWORD" || true
+              echo "NOTARIZED=false" >> "$GITHUB_ENV"
+            fi
           else
-            echo "::warning::Notarization timed out or failed. Releasing signed-only build."
+            echo "::warning::Notarization timed out. Fetching log..."
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" || true
             echo "NOTARIZED=false" >> "$GITHUB_ENV"
           fi
 
